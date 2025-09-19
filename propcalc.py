@@ -459,14 +459,21 @@ def plot_selected_prop(best: dict, Re: float = 2e6):
 
     fig, ax1 = plt.subplots(figsize=(8, 6), dpi=150)
     ax2 = ax1.twinx()
-    ax1.plot(J_vals, KT_vals, '-', label='KT (solid)')
-    ax2.plot(J_vals, KQ_vals, '--', label='KQ (dashed)')
-    ax1.plot(J_vals, eta_vals, ':', label='η0 (dotted)')
-    ax1.axvline(best['J'], color='red', linestyle=':', label='Selected J')
+
+    line_kt, = ax1.plot(J_vals, KT_vals, '-', label='KT (solid)')
+    line_kq, = ax2.plot(J_vals, KQ_vals, '--', label='KQ (dashed)')
+    line_eta, = ax1.plot(J_vals, eta_vals, ':', label='η0 (dotted)')
+    line_sel = ax1.axvline(best['J'], color='red', linestyle=':', label='Selected J')
+
     ax1.set_xlabel("Advance Coefficient J")
     ax1.set_ylabel("KT, η0")
     ax2.set_ylabel("KQ")
-    ax1.legend(loc="best")
+
+    # Collect all lines from both axes
+    lines = [line_kt, line_kq, line_eta, line_sel]
+    labels = [l.get_label() for l in lines]
+    ax1.legend(lines, labels, loc="best")
+
     plt.title("Selected Propeller Performance")
     plt.tight_layout()
     return fig
