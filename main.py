@@ -12,18 +12,35 @@ from propcalc import (
 with st.expander("ℹ️ What does this app do?"):
     st.markdown(
         """
-        This app sizes an **optimum Wageningen B-Series propeller** given ship resistance,
-        vessel speed, and optional max diameter.
+        This app helps you **size an optimum Wageningen B-Series propeller**  
+        based on your vessel’s resistance, speed, and optional diameter limits.
 
-        - Computes thrust & power requirements  
-        - Searches a grid of propeller parameters (D, RPM, Z, AE/A0, P/D)  
-        - Selects the most efficient feasible propeller  
-        - Shows per-prop and total power for multi-prop setups  
-        - Plots KT, KQ, η₀ vs. J and efficiency trade-space maps  
+        **What it does:**
+        - Calculates thrust and power requirements  
+        - Optimises propeller parameters (Diameter, RPM, Blade count, AE/A0, P/D)  
+        - Finds the most efficient feasible propeller using **grid search**  
+        - Refines the result with **continuous optimisation** for higher accuracy  
+        - Allows optional inputs for **fixed shaft power** and/or **fixed RPM**  
+        - Reports per-prop and total power for multi-propeller setups  
+
+        **Outputs include:**
+        - Summary of the chosen propeller(s)  
+        - Full optimisation results (expandable)  
+        - Interactive plots:
+            - KT, KQ, and η₀ vs. J curves  
+            - Efficiency trade-space maps (scatter & 3D surface)
+
+        ---
+        **How to use:**
+        1. Enter your vessel’s **resistance** (kN) and **speed** (knots).  
+        2. Optionally provide maximum diameter, shaft power, or fixed RPM.  
+        3. Choose the **number of propellers** and **blades** (or let optimiser decide).  
+        4. Click **Calculate** to run both grid and continuous optimisation.  
+        5. Review the summary, expand results, and open plots as needed.
         """
     )
 
-st.title("Wageningen B-Series Propeller Sizing")
+st.title("Marine Propeller Sizing Tool")
 
 col1, col2 = st.columns(2)
 
