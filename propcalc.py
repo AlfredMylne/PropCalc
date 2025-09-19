@@ -445,8 +445,9 @@ def plot_selected_prop(best: dict, Re: float = 2e6):
 
     clipped = False
     for J in J_vals:
-        KT, KQ = bseries_eval_clipped(J, PD, AE, Z, Re)
-        if not np.isfinite(KT) or clipped:
+        KT, KQ = bseries_eval_poly(J, PD, AE, Z, Re)
+        if KT <= 0 or KQ <= 0 or clipped:
+            # mask everything once either coefficient goes non-positive
             KT_vals.append(np.nan)
             KQ_vals.append(np.nan)
             eta_vals.append(np.nan)
@@ -455,9 +456,6 @@ def plot_selected_prop(best: dict, Re: float = 2e6):
             KT_vals.append(KT)
             KQ_vals.append(KQ)
             eta_vals.append(J * KT / (2 * math.pi * KQ))
-
-    # enforce monotone KQ
-    KQ_vals = enforce_monotone_KQ(J_vals, KQ_vals)
 
     fig, ax1 = plt.subplots(figsize=(8, 6), dpi=150)
     ax2 = ax1.twinx()
@@ -472,6 +470,8 @@ def plot_selected_prop(best: dict, Re: float = 2e6):
     plt.title("Selected Propeller Performance")
     plt.tight_layout()
     return fig
+
+
 
 
 def plot_efficiency_map(trade_space, color_by="P_over_D", filters=None,
