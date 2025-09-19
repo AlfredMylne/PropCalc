@@ -325,7 +325,7 @@ def plot_selected_prop(best: dict, Re: float = 2e6):
     return fig
 
 
-ddef plot_efficiency_map(trade_space, color_by="P_over_D", filters=None,
+def plot_efficiency_map(trade_space, color_by="P_over_D", filters=None,
                         best_grid=None, best_cont=None):
     df = pd.DataFrame(trade_space)
 
