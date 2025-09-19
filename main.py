@@ -1,5 +1,27 @@
 import streamlit as st
-from propcalc import optimize_propeller, plot_selected_prop, plot_efficiency_map, plot_efficiency_surface
+# Add this import at the top
+import plotly.graph_objects as go
+from propcalc import (
+    optimize_propeller,
+    plot_selected_prop,
+    plot_efficiency_map,
+    plot_efficiency_surface,
+    continuous_optimize
+)
+
+with st.expander("ℹ️ What does this app do?"):
+    st.markdown(
+        """
+        This app sizes an **optimum Wageningen B-Series propeller** given ship resistance,
+        vessel speed, and optional max diameter.
+
+        - Computes thrust & power requirements  
+        - Searches a grid of propeller parameters (D, RPM, Z, AE/A0, P/D)  
+        - Selects the most efficient feasible propeller  
+        - Shows per-prop and total power for multi-prop setups  
+        - Plots KT, KQ, η₀ vs. J and efficiency trade-space maps  
+        """
+    )
 
 st.title("Wageningen B-Series Propeller Sizing")
 
@@ -8,28 +30,55 @@ speed = st.number_input("Ship Speed (knots)", min_value=0.0, value=12.0)
 dmax = st.number_input("Max Propeller Diameter (m, optional, 0=ignore)", min_value=0.0, value=0.0)
 nprop = st.number_input("Number of Propellers", min_value=1, max_value=4, value=1, step=1)
 
+mode = st.radio("Optimisation Mode", ["Grid Search", "Continuous"])
+
 if st.button("Calculate"):
     dmax_val = None if dmax <= 0 else dmax
-    best = optimize_propeller(resistance, speed,
-                              diameter_max_m=dmax_val,
-                              n_propellers=nprop)
-    st.session_state["best_result"] = best
 
-if "best_result" in st.session_state:
-    best = st.session_state["best_result"]
+    # Always run grid search (gives trade space for plotting)
+    best_grid = optimize_propeller(
+        resistance, speed,
+        diameter_max_m=dmax_val,
+        n_propellers=nprop
+    )
 
-    if not best.get("feasible", False):
-        st.error(best["message"])
+    # Run continuous optimisation, seeding with grid search diameter + blades
+    with st.spinner("Running continuous optimiser..."):
+        best_cont = continuous_optimize(
+            resistance, speed,
+            diameter_guess=dmax_val or best_grid.get("D_m", 1.0),
+            Z=best_grid.get("Z", 4),
+            n_propellers=nprop
+        )
+    st.success("Continuous optimisation complete")
+
+    st.session_state["best_grid"] = best_grid
+    st.session_state["best_cont"] = best_cont
+
+
+# --- Results Display ---
+if "best_grid" in st.session_state:
+    best_grid = st.session_state["best_grid"]
+    best_cont = st.session_state.get("best_cont", {})
+
+    st.subheader("Optimisation Results")
+
+    if best_grid.get("feasible", False):
+        st.success("Grid search result:")
+        st.json({k: v for k, v in best_grid.items() if k != "trade_space"})
     else:
-        summary = {k: v for k, v in best.items() if k != "trade_space"}
-        st.success(best["message"])
-        st.json(summary)
+        st.error(best_grid["message"])
 
-        # Chosen prop curves
+    if best_cont.get("feasible", False):
+        st.success("Continuous optimisation result:")
+        st.json({k: v for k, v in best_cont.items() if k != "trade_space"})
+    else:
+        st.error(best_cont.get("message", "Continuous optimisation failed"))
+
+        # Plot selected propeller performance
         fig = plot_selected_prop(best)
         st.pyplot(fig)
 
-        # Efficiency map controls (placed just above plot)
         st.subheader("Efficiency Map of Trade Space")
 
         view_mode = st.radio(
@@ -38,22 +87,27 @@ if "best_result" in st.session_state:
         )
 
         if view_mode == "Scatter (raw candidates)":
-            # First set up controls
             color_by = st.selectbox(
                 "Color points by:", ["P_over_D", "AE_A0", "Z", "D_m", "RPM"]
             )
 
             st.write("Filter candidates:")
-            fZ = st.multiselect("Blades (Z)", sorted(set(c["Z"] for c in best["trade_space"])))
-            fPD = st.multiselect("Pitch/Diameter", sorted(set(c["P_over_D"] for c in best["trade_space"])))
-            fAE = st.multiselect("AE/A0", sorted(set(c["AE_A0"] for c in best["trade_space"])))
+            fZ = st.multiselect("Blades (Z)", sorted(set(c["Z"] for c in best.get("trade_space", []))))
+            fPD = st.multiselect("Pitch/Diameter", sorted(set(c["P_over_D"] for c in best.get("trade_space", []))))
+            fAE = st.multiselect("AE/A0", sorted(set(c["AE_A0"] for c in best.get("trade_space", []))))
 
             filters = {"Z": fZ, "P_over_D": fPD, "AE_A0": fAE}
 
-            # Now call plotting
-            fig_map = plot_efficiency_map(best["trade_space"], color_by=color_by, filters=filters, best=best)
-            st.plotly_chart(fig_map, use_container_width=True)
+            if "trade_space" in best:
+                fig_map = plot_efficiency_map(
+                    best_grid["trade_space"], color_by=color_by,
+                    filters=filters,
+                    best_grid=best_grid if best_grid.get("feasible") else None,
+                    best_cont=best_cont if best_cont.get("feasible") else None
+                )
+                st.plotly_chart(fig_map, use_container_width=True)
 
         else:
-            fig_surface = plot_efficiency_surface(best["trade_space"], best=best)
-            st.plotly_chart(fig_surface, use_container_width=True)
+            if "trade_space" in best:
+                fig_surface = plot_efficiency_surface(best["trade_space"], best=best)
+                st.plotly_chart(fig_surface, use_container_width=True)
