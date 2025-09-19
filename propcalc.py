@@ -24,6 +24,44 @@ import plotly.express as px
 import plotly.graph_objects as go
 from scipy.interpolate import griddata
 
+
+def fmt_dict(d: dict, sig: int = 5) -> dict:
+    """Format all floats in a dict to N significant figures."""
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, (float, np.floating)):
+            out[k] = float(f"{v:.{sig}g}")
+        elif isinstance(v, dict):
+            out[k] = fmt_dict(v, sig)
+        else:
+            out[k] = v
+    return out
+
+
+def fmt_dataframe(df: pd.DataFrame, sig: int = 5) -> pd.DataFrame:
+    df_fmt = df.copy()
+    for col in df_fmt.columns:
+        if pd.api.types.is_numeric_dtype(df_fmt[col]):
+            df_fmt[col] = df_fmt[col].apply(
+                lambda v: float(f"{v:.{sig}g}") if isinstance(v, (float, np.floating)) else v
+            )
+    return df_fmt
+
+
+def format_hover(d: dict, sig: int = 5) -> str:
+    """Return a multi-line hover string with formatted numbers."""
+    lines = []
+    for k in ["J", "Efficiency", "Z", "AE_A0", "P_over_D", "D_m",
+              "RPM", "Power_W", "Thrust_N"]:
+        if k in d:
+            v = d[k]
+            if isinstance(v, (float, np.floating)):
+                lines.append(f"{k}={v:.{sig}g}")
+            else:
+                lines.append(f"{k}={v}")
+    return "<br>".join(lines)
+
+
 # ---------------- Polynomial Coefficients (Table 1) ---------------- #
 # Format: (coeff, s, t, u, v)
 
@@ -128,6 +166,8 @@ def optimize_propeller(resistance_kN: float,
                        diameter_max_m: float | None = None,
                        *,
                        n_propellers: int = 1,
+                       fixed_power_W: float | None = None,
+                       fixed_rpm: float | None = None,
                        mode: str = "max_efficiency",
                        eta0_min: float = 0.55,
                        wake_fraction: float = 0.20,
@@ -168,6 +208,10 @@ def optimize_propeller(resistance_kN: float,
     progress_bar = st.progress(0, text="Optimising...")
     counter = 0
     update_interval = max(1, total_iters // 100)  # Update ~100 times
+
+    if fixed_rpm:
+        rpm_vals = [fixed_rpm]
+
     for Z in Z_list:
         for AE in AE_list:
             for PD in PD_list:
@@ -189,6 +233,8 @@ def optimize_propeller(resistance_kN: float,
                         if T < T_req: continue
                         Q = rho * n ** 2 * D ** 5 * KQ
                         P = 2 * math.pi * n * Q
+                        if fixed_power_W and abs(P - fixed_power_W) > 0.05 * fixed_power_W:
+                            continue
                         eta0 = (J * KT) / (2 * math.pi * KQ) if KQ > 1e-9 else 0
 
                         row = dict(Z=Z, AE_A0=AE, P_over_D=PD, D_m=D, RPM=rpm,
@@ -213,6 +259,7 @@ def optimize_propeller(resistance_kN: float,
         return {"feasible": False, "message": "No feasible solution found."}
     best["feasible"] = True
     best["message"] = (
+        f"Grid optimisation: "
         f"{n_propellers} × propellers: "
         f"Z={best['Z']}, AE/A0={best['AE_A0']}, P/D={best['P_over_D']}, "
         f"D={best['D_m']:.2f} m, RPM={best['RPM']:.0f}, "
@@ -221,9 +268,7 @@ def optimize_propeller(resistance_kN: float,
         f"Total Power={best['Total_Power_W'] / 1000:.1f} kW"
     )
     progress_bar.empty()  # clear when finished
-    return best
-
-
+    return fmt_dict(best, 5)
 
 
 def continuous_optimize(resistance_kN: float,
@@ -234,10 +279,13 @@ def continuous_optimize(resistance_kN: float,
                         wake_fraction: float = 0.20,
                         thrust_deduction: float = 0.10,
                         nu: float = 1.1e-6,
-                        rho: float = 1025.0):
+                        rho: float = 1025.0,
+                        seed: dict | None = None,
+                        fixed_power_W: float | None = None,
+                        fixed_rpm: float | None = None):
     """
-    Continuous optimiser: varies P/D, AE/A0, RPM and D (around a guess) to hone in
-    on the best efficiency subject to thrust & power balance.
+    Continuous optimiser: maximise efficiency subject to thrust >= requirement
+    and optional power/RPM constraints. Uses SLSQP with constraints.
     """
 
     R = resistance_kN * 1000.0
@@ -246,15 +294,16 @@ def continuous_optimize(resistance_kN: float,
     T_total = R / (1.0 - thrust_deduction)
     T_req = T_total / max(1, n_propellers)
 
+    # --- Objective: maximise efficiency (η₀) ---
     def objective(x):
         P_D, AE, D, rpm = x
         n = rpm / 60.0
         J = Va / (n * D)
-        if not (0.2 <= J <= 1.4):  # validity check
+        if not (0.2 <= J <= 1.4):
             return 1e3
 
         tip_speed = 2 * math.pi * n * (D / 2)
-        if tip_speed > 70:  # same as your limit
+        if tip_speed > 70:
             return 1e3
 
         Re = compute_re_075R(Va, n, D, nu)
@@ -262,42 +311,109 @@ def continuous_optimize(resistance_kN: float,
         if KQ <= 0:
             return 1e3
 
-        T = rho * n**2 * D**4 * KT
-        Q = rho * n**2 * D**5 * KQ
+        T = rho * n ** 2 * D ** 4 * KT
+        Q = rho * n ** 2 * D ** 5 * KQ
         P = 2 * math.pi * n * Q
         eta0 = (J * KT) / (2 * math.pi * KQ)
 
-        penalty = abs(T - T_req) * 1e-3
+        # Penalise thrust shortfall (soft)
+        penalty = max(0, (T_req - T)) * 1e-3
+
+        # Soft penalty for power mismatch
+        if fixed_power_W:
+            penalty += abs(P - fixed_power_W) / fixed_power_W * 1e-2
+
         return -(eta0) + penalty
 
-    x0 = [0.9, 0.55, diameter_guess, 1000]
-    bounds = [(0.6, 1.4), (0.3, 0.8), (diameter_guess*0.7, diameter_guess*1.1), (300, 2000)]
+    # --- Constraint: thrust >= required ---
+    def thrust_constraint(x):
+        P_D, AE, D, rpm = x
+        n = rpm / 60.0
+        J = Va / (n * D)
+        KT, _ = bseries_eval_poly(J, P_D, AE, Z)
+        T = rho * n ** 2 * D ** 4 * KT
+        return T - T_req  # must be >= 0
 
-    result = minimize(objective, x0, bounds=bounds, method="TNC", options={'maxiter': 1000})
+    constraints = [{"type": "ineq", "fun": thrust_constraint}]
 
-    if not result.success:
-        return {"feasible": False, "message": "Continuous optimisation failed."}
+    # --- Optional power constraint (tolerance band ±5%) ---
+    if fixed_power_W:
+        def power_constraint(x):
+            P_D, AE, D, rpm = x
+            n = rpm / 60.0
+            J = Va / (n * D)
+            _, KQ = bseries_eval_poly(J, P_D, AE, Z)
+            Q = rho * n ** 2 * D ** 5 * KQ
+            P = 2 * math.pi * n * Q
+            return 0.05 * fixed_power_W - abs(P - fixed_power_W)
 
+        constraints.append({"type": "ineq", "fun": power_constraint})
+
+    # --- Initial guess ---
+    if seed and seed.get("feasible", False):
+        x0 = [seed["P_over_D"], seed["AE_A0"], seed["D_m"], seed["RPM"]]
+    else:
+        x0 = [0.9, 0.55, diameter_guess, fixed_rpm or 1000]
+
+    # --- Bounds ---
+    rpm_bounds = (fixed_rpm * 0.9, fixed_rpm * 1.1) if fixed_rpm else (300, 2000)
+    bounds = [
+        (0.6, 1.4),  # P/D
+        (0.3, 0.7),  # AE/A0 (clamped)
+        (diameter_guess * 0.7, diameter_guess * 1.1),  # D
+        rpm_bounds  # RPM
+    ]
+
+    # --- Run optimisation ---
+    result = minimize(
+        objective, x0,
+        bounds=bounds,
+        constraints=constraints,
+        method="SLSQP",
+        options={"maxiter": 5000, "ftol": 1e-6}
+    )
+
+    # --- Extract solution ---
     P_D, AE, D, rpm = result.x
     n = rpm / 60.0
     J = Va / (n * D)
     Re = compute_re_075R(Va, n, D, nu)
     KT, KQ = bseries_eval_poly(J, P_D, AE, Z, Re)
-    T = rho * n**2 * D**4 * KT
-    Q = rho * n**2 * D**5 * KQ
+    T = rho * n ** 2 * D ** 4 * KT
+    Q = rho * n ** 2 * D ** 5 * KQ
     P = 2 * math.pi * n * Q
     eta0 = (J * KT) / (2 * math.pi * KQ)
 
-    return dict(
+    msg = (f"Continuous opt: "
+        f"{n_propellers} × propellers: "
+        f"Z={Z}, AE/A0={AE:.3f}, P/D={P_D:.3f}, "
+        f"D={D:.2f} m, RPM={rpm:.0f}, "
+        f"η0={eta0:.3f}, "
+        f"Per-prop Power={P / 1000:.1f} kW, "
+        f"Total Power={(P * n_propellers) / 1000:.1f} kW"
+    )
+
+    if not result.success:
+        msg = f"⚠️ Continuous optimisation warning: {result.message}"
+
+    result_dict = dict(
         feasible=True,
         Z=Z, AE_A0=AE, P_over_D=P_D, D_m=D, RPM=rpm,
         n_rps=n, J=J, KT=KT, KQ=KQ,
         Thrust_N=T, Torque_Nm=Q, Power_W=P, Efficiency=eta0,
-        message=(f"Continuous opt: Z={Z}, AE/A0={AE:.3f}, P/D={P_D:.3f}, "
-                 f"D={D:.2f} m, RPM={rpm:.0f}, η0={eta0:.3f}")
+        Required_Thrust_N=T_req,
+        Required_Power_W=fixed_power_W if fixed_power_W else None,
+        n_propellers=n_propellers,
+        Total_Thrust_N=T_total,
+        Total_Power_W=P * n_propellers,
+        Total_Torque_Nm=Q * n_propellers,
+        message=msg
     )
 
+    # Keep structure consistent with grid search
+    result_dict["trade_space"] = [result_dict.copy()]
 
+    return fmt_dict(result_dict, 5)
 
 
 # --- Plotting ---
@@ -328,6 +444,7 @@ def plot_selected_prop(best: dict, Re: float = 2e6):
 def plot_efficiency_map(trade_space, color_by="P_over_D", filters=None,
                         best_grid=None, best_cont=None):
     df = pd.DataFrame(trade_space)
+    df = fmt_dataframe(df, 5)
 
     if filters:
         for key, vals in filters.items():
@@ -348,7 +465,9 @@ def plot_efficiency_map(trade_space, color_by="P_over_D", filters=None,
             y=[best_grid["Efficiency"]],
             mode="markers",
             marker=dict(color="red", size=12, symbol="x"),
-            name="Grid Optimum"
+            name="Grid Optimum",
+            hovertext=format_hover(best_grid, 5),
+            hoverinfo="text"
         )
 
     if best_cont:
@@ -357,7 +476,9 @@ def plot_efficiency_map(trade_space, color_by="P_over_D", filters=None,
             y=[best_cont["Efficiency"]],
             mode="markers",
             marker=dict(color="blue", size=12, symbol="diamond"),
-            name="Continuous Optimum"
+            name="Continuous Optimum",
+            hovertext=format_hover(best_cont, 5),
+            hoverinfo="text"
         )
 
     fig.update_layout(
@@ -369,7 +490,7 @@ def plot_efficiency_map(trade_space, color_by="P_over_D", filters=None,
     return fig
 
 
-def plot_efficiency_surface(trade_space, resolution=50, best=None):
+def plot_efficiency_surface(trade_space, resolution=50, best_grid=None, best_cont=None):
     import pandas as pd
     import numpy as np
     from scipy.interpolate import griddata
@@ -391,15 +512,29 @@ def plot_efficiency_surface(trade_space, resolution=50, best=None):
 
     fig = go.Figure(data=[go.Surface(z=Eta_mesh, x=J_mesh, y=PD_mesh, colorscale="Viridis")])
 
-    # Highlight best prop if provided
-    if best:
+    # Highlight grid optimum
+    if best_grid:
         fig.add_trace(go.Scatter3d(
-            x=[best["J"]],
-            y=[best["P_over_D"]],
-            z=[best["Efficiency"]],
+            x=[best_grid["J"]],
+            y=[best_grid["P_over_D"]],
+            z=[best_grid["Efficiency"]],
             mode="markers",
-            marker=dict(color="red", size=6, symbol="diamond"),
-            name="Selected"
+            marker=dict(color="red", size=8, symbol="x"),
+            name="Grid Optimum",
+            text=[format_hover(best_grid, 5)],
+            hoverinfo="text"
+        ))
+
+    if best_cont:
+        fig.add_trace(go.Scatter3d(
+            x=[best_cont["J"]],
+            y=[best_cont["P_over_D"]],
+            z=[best_cont["Efficiency"]],
+            mode="markers",
+            marker=dict(color="blue", size=8, symbol="diamond"),
+            name="Continuous Optimum",
+            text=[format_hover(best_cont, 5)],
+            hoverinfo="text"
         ))
 
     fig.update_layout(
