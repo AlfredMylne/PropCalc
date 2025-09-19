@@ -472,7 +472,7 @@ def plot_selected_prop(best: dict, Re: float = 2e6):
     # Collect all lines from both axes
     lines = [line_kt, line_kq, line_eta, line_sel]
     labels = [l.get_label() for l in lines]
-    ax1.legend(lines, labels, loc="best")
+    ax1.legend(lines, labels, loc="upper right")
 
     plt.title("Selected Propeller Performance")
     plt.tight_layout()
