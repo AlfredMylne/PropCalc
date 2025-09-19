@@ -139,6 +139,13 @@ def reynolds_corrections(J: float, PD: float, AE: float, Z: int, Re: float):
 
     return dKT, dKQ
 
+def enforce_monotone_KQ(J_vals, KQ_vals):
+    """Force KQ(J) to be non-increasing up to thrust cutoff."""
+    out = np.array(KQ_vals, dtype=float)
+    mask = np.isfinite(out)
+    if np.any(mask):
+        out[mask] = np.minimum.accumulate(out[mask])
+    return out
 
 def eval_poly(J, PD, AE, Z, coeffs):
     return sum(c * (J ** s) * (PD ** t) * (AE ** u) * (Z ** v) for c, s, t, u, v in coeffs)
@@ -150,6 +157,18 @@ def bseries_eval_poly(J, PD, AE, Z, Re=2e6):
     dKT, dKQ = reynolds_corrections(J, PD, AE, Z, Re)
     return KT + dKT, KQ + dKQ
 
+def bseries_eval_clipped(J, PD, AE, Z, Re=2e6):
+    """Evaluate KT, KQ with guards:
+       - stop at KT<=0
+       - reject KQ<=0
+       - enforce non-increasing KQ vs J
+    """
+    KT, KQ = bseries_eval_poly(J, PD, AE, Z, Re)
+
+    if KT <= 0 or KQ <= 0:
+        return float("nan"), float("nan")
+
+    return KT, KQ
 
 def compute_re_075R(Va, n, D, nu=1.1e-6, c075_over_D=0.10):
     r = 0.75 * (D / 2.0)
@@ -227,7 +246,9 @@ def optimize_propeller(resistance_kN: float,
                         tip_speed = 2 * math.pi * n * (D / 2)
                         if tip_speed > tip_speed_max: continue
                         Re = compute_re_075R(Va, n, D, nu)
-                        KT, KQ = bseries_eval_poly(J, PD, AE, Z, Re)
+                        KT, KQ = bseries_eval_clipped(J, PD, AE, Z, Re)
+                        if not np.isfinite(KT) or not np.isfinite(KQ):
+                            continue
                         if KQ <= 0: continue
                         T = rho * n ** 2 * D ** 4 * KT
                         if T < T_req: continue
@@ -421,11 +442,23 @@ def plot_selected_prop(best: dict, Re: float = 2e6):
     J_vals = np.linspace(0.0, 1.4, 200)
     KT_vals, KQ_vals, eta_vals = [], [], []
     PD, AE, Z = best['P_over_D'], best['AE_A0'], best['Z']
+
+    clipped = False
     for J in J_vals:
-        KT, KQ = bseries_eval_poly(J, PD, AE, Z, Re)
-        KT_vals.append(KT);
-        KQ_vals.append(KQ)
-        eta_vals.append(J * KT / (2 * math.pi * KQ) if KQ > 1e-9 else math.nan)
+        KT, KQ = bseries_eval_clipped(J, PD, AE, Z, Re)
+        if not np.isfinite(KT) or clipped:
+            KT_vals.append(np.nan)
+            KQ_vals.append(np.nan)
+            eta_vals.append(np.nan)
+            clipped = True
+        else:
+            KT_vals.append(KT)
+            KQ_vals.append(KQ)
+            eta_vals.append(J * KT / (2 * math.pi * KQ))
+
+    # enforce monotone KQ
+    KQ_vals = enforce_monotone_KQ(J_vals, KQ_vals)
+
     fig, ax1 = plt.subplots(figsize=(8, 6), dpi=150)
     ax2 = ax1.twinx()
     ax1.plot(J_vals, KT_vals, '-', label='KT (solid)')
