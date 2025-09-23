@@ -258,10 +258,20 @@ def optimize_propeller(resistance_kN: float,
                             continue
                         eta0 = (J * KT) / (2 * math.pi * KQ) if KQ > 1e-9 else 0
 
+                        # New cavitation loading index
+                        CT = KT  # by definition
+                        loading_index = CT / (Z * AE)  # AE is AE/A0 here
+
+                        # Apply penalty
+                        penalty_factor = 0.1  # tweak this value
+                        score = eta0 - penalty_factor * loading_index
+
                         row = dict(Z=Z, AE_A0=AE, P_over_D=PD, D_m=D, RPM=rpm,
                                    n_rps=n, J=J, KT=KT, KQ=KQ,
-                                   Thrust_N=T, Torque_Nm=Q, Power_W=P, Efficiency=eta0,
+                                   Thrust_N=T, Torque_Nm=Q, Power_W=P,
+                                   Efficiency=eta0, Score=score,
                                    tip_speed_mps=tip_speed)
+
                         trade_space.append(row)
                         if mode == "min_power_eta":
                             if eta0 < eta0_min: continue
