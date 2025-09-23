@@ -221,7 +221,7 @@ def optimize_propeller(resistance_kN: float,
     rpm_vals = np.linspace(rpm_min, rpm_max, 50)
 
     best = None;
-    best_metric = -1;
+    best_metric = -1e9;
     best_power = float("inf")
     total_iters = len(Z_list) * len(AE_list) * len(PD_list) * len(D_vals) * len(rpm_vals)
     progress_bar = st.progress(0, text="Optimising...")
@@ -258,12 +258,16 @@ def optimize_propeller(resistance_kN: float,
                             continue
                         eta0 = (J * KT) / (2 * math.pi * KQ) if KQ > 1e-9 else 0
 
+                        # Skip inefficient props
+                        #if eta0 < eta0_min:
+                        #    continue
+
                         # New cavitation loading index
                         CT = KT  # by definition
                         loading_index = CT / (Z * AE)  # AE is AE/A0 here
 
                         # Apply penalty
-                        penalty_factor = 0.1  # tweak this value
+                        penalty_factor = 1  # tweak this value
                         score = eta0 - penalty_factor * loading_index
 
                         row = dict(Z=Z, AE_A0=AE, P_over_D=PD, D_m=D, RPM=rpm,
@@ -277,9 +281,9 @@ def optimize_propeller(resistance_kN: float,
                             if eta0 < eta0_min: continue
                             if P < best_power: best = row; best_power = P
                         else:  # max_efficiency
-                            if eta0 > best_metric or (abs(eta0 - best_metric) < 1e-4 and P < best_power):
-                                best = row;
-                                best_metric = eta0;
+                            if score > best_metric or (abs(score - best_metric) < 1e-4 and P < best_power):
+                                best = row
+                                best_metric = score
                                 best_power = P
                                 best["n_propellers"] = n_propellers
                                 best["Total_Thrust_N"] = T_total
