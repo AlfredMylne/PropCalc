@@ -45,10 +45,10 @@ st.title("Marine Propeller Sizing Tool")
 col1, col2 = st.columns(2)
 
 with col1:
-    resistance = st.number_input("Ship Resistance (kN)", min_value=0.0, value=178.0)
-    speed = st.number_input("Ship Speed (knots)", min_value=0.0, value=18.0)
+    resistance = st.number_input("Ship Resistance (kN)", min_value=0.0, value=25.0)
+    speed = st.number_input("Ship Speed (knots)", min_value=0.0, value=12.0)
     dmax = st.number_input("Max Propeller Diameter (m, 0 = ignore)", min_value=0.0, value=0.0)
-    nprop = st.number_input("Number of Propellers", min_value=1, max_value=4, value=2, step=1)
+    nprop = st.number_input("Number of Propellers", min_value=1, max_value=4, value=1, step=1)
 
 with col2:
     power = st.number_input("Shaft Power (kW, 0 = ignore)", min_value=0.0, value=0.0)

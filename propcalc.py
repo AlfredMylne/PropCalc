@@ -139,7 +139,6 @@ def reynolds_corrections(J: float, PD: float, AE: float, Z: int, Re: float):
 
     return dKT, dKQ
 
-
 def enforce_monotone_KQ(J_vals, KQ_vals):
     """Force KQ(J) to be non-increasing up to thrust cutoff."""
     out = np.array(KQ_vals, dtype=float)
@@ -147,7 +146,6 @@ def enforce_monotone_KQ(J_vals, KQ_vals):
     if np.any(mask):
         out[mask] = np.minimum.accumulate(out[mask])
     return out
-
 
 def eval_poly(J, PD, AE, Z, coeffs):
     return sum(c * (J ** s) * (PD ** t) * (AE ** u) * (Z ** v) for c, s, t, u, v in coeffs)
@@ -158,7 +156,6 @@ def bseries_eval_poly(J, PD, AE, Z, Re=2e6):
     KQ = eval_poly(J, PD, AE, Z, KQ_COEFFS)
     dKT, dKQ = reynolds_corrections(J, PD, AE, Z, Re)
     return KT + dKT, KQ + dKQ
-
 
 def bseries_eval_clipped(J, PD, AE, Z, Re=2e6):
     """Evaluate KT, KQ with guards:
@@ -173,7 +170,6 @@ def bseries_eval_clipped(J, PD, AE, Z, Re=2e6):
 
     return KT, KQ
 
-
 def compute_re_075R(Va, n, D, nu=1.1e-6, c075_over_D=0.10):
     r = 0.75 * (D / 2.0)
     Vrel = (Va ** 2 + (2 * math.pi * n * r) ** 2) ** 0.5
@@ -184,32 +180,36 @@ def compute_re_075R(Va, n, D, nu=1.1e-6, c075_over_D=0.10):
 KTS_TO_MS = 0.514444
 
 
-def optimize_propeller_improved(resistance_kN: float,
-                                speed_knots: float,
-                                diameter_max_m: float | None = None,
-                                *,
-                                n_propellers: int = 1,
-                                fixed_power_W: float | None = None,
-                                fixed_rpm: float | None = None,
-                                mode: str = "min_power",
-                                eta0_min: float = 0.45,
-                                wake_fraction: float = 0.20,
-                                thrust_deduction: float = 0.10,
-                                rpm_min: float = 300.0,
-                                rpm_max: float = 2000.0,
-                                tip_speed_max: float = 70.0,
-                                Z_list=(3, 4, 5),  # Reduced for common cases
-                                AE_list=np.linspace(0.4, 0.7, 16),  # 0.02 increments
-                                PD_list=np.linspace(0.7, 1.1, 21),  # 0.02 increments
-                                D_min_fraction: float = 0.70,
-                                default_D_range=(0.3, 3),
-                                nu: float = 1.1e-6,
-                                rho: float = 1025.0) -> dict:
-    # Setup (same as before)
+def optimize_propeller(resistance_kN: float,
+                       speed_knots: float,
+                       diameter_max_m: float | None = None,
+                       *,
+                       n_propellers: int = 1,
+                       fixed_power_W: float | None = None,
+                       fixed_rpm: float | None = None,
+                       mode: str = "max_efficiency",
+                       eta0_min: float = 0.55,
+                       wake_fraction: float = 0.20,
+                       thrust_deduction: float = 0.10,
+                       rpm_min: float = 300.0,
+                       rpm_max: float = 2000.0,
+                       tip_speed_max: float = 70.0,
+                       Z_list=(2, 3, 4, 5, 6, 7),
+                       AE_list=np.linspace(0.3, 0.7, 5),  # 41 steps, ~0.01 increments
+                       PD_list=np.linspace(0.6, 1.2, 7),  # 61 steps, ~0.01 increments
+                       D_min_fraction: float = 0.70,
+                       default_D_range=(0.3, 3),
+                       nu: float = 1.1e-6,
+                       rho: float = 1025.0) -> dict:
+    """Main API: optimize a Wageningen B-series propeller from minimal inputs."""
     R = resistance_kN * 1000.0
     Vs = speed_knots * KTS_TO_MS
     Va = Vs * (1.0 - wake_fraction)
+    # Total thrust required
     T_total = R / (1.0 - thrust_deduction)
+    trade_space = []
+
+    # Per-prop thrust requirement
     T_req = T_total / max(1, n_propellers)
 
     if diameter_max_m:
@@ -217,90 +217,78 @@ def optimize_propeller_improved(resistance_kN: float,
         Dmin = Dmax * D_min_fraction
     else:
         Dmin, Dmax = default_D_range
+    D_vals = np.linspace(Dmin, Dmax, 30)
+    rpm_vals = np.linspace(rpm_min, rpm_max, 50)
 
-    # Use logarithmic spacing for RPM and diameter for better coverage
-    D_vals = np.linspace(Dmin, Dmax, 25)
-    rpm_vals = np.logspace(np.log10(rpm_min), np.log10(rpm_max), 40)
-
-    best = None
-    best_power = float('inf')
-    best_metric = -float('inf')
-    trade_space = []
-
+    best = None;
+    best_metric = -1;
+    best_power = float("inf")
     total_iters = len(Z_list) * len(AE_list) * len(PD_list) * len(D_vals) * len(rpm_vals)
+    progress_bar = st.progress(0, text="Optimising...")
+    counter = 0
+    update_interval = max(1, total_iters // 100)  # Update ~100 times
+
+    if fixed_rpm:
+        rpm_vals = [fixed_rpm]
 
     for Z in Z_list:
         for AE in AE_list:
             for PD in PD_list:
                 for D in D_vals:
                     for rpm in rpm_vals:
+                        counter += 1
+                        if counter % update_interval == 0:
+                            progress_bar.progress(counter / total_iters,
+                                                  text=f"Optimising... {int((counter / total_iters) * 100)}%")
                         n = rpm / 60.0
                         J = Va / (n * D)
-
-                        # Early feasibility checks
-                        if not (0.1 <= J <= 1.2):  # Wider but reasonable J range
-                            continue
-
+                        if not (0.2 <= J <= 1.4): continue
                         tip_speed = 2 * math.pi * n * (D / 2)
-                        if tip_speed > tip_speed_max:
-                            continue
-
+                        if tip_speed > tip_speed_max: continue
                         Re = compute_re_075R(Va, n, D, nu)
                         KT, KQ = bseries_eval_clipped(J, PD, AE, Z, Re)
-
-                        if not (np.isfinite(KT) and np.isfinite(KQ) and KT > 0 and KQ > 0):
+                        if not np.isfinite(KT) or not np.isfinite(KQ):
                             continue
-
+                        if KQ <= 0: continue
                         T = rho * n ** 2 * D ** 4 * KT
-                        if T < T_req * 0.98:  # Allow small tolerance
-                            continue
-
+                        if T < T_req: continue
                         Q = rho * n ** 2 * D ** 5 * KQ
                         P = 2 * math.pi * n * Q
-                        eta0 = (J * KT) / (2 * math.pi * KQ)
-
                         if fixed_power_W and abs(P - fixed_power_W) > 0.05 * fixed_power_W:
                             continue
+                        eta0 = (J * KT) / (2 * math.pi * KQ) if KQ > 1e-9 else 0
 
-                        #if eta0 < eta0_min:
-                        #    continue
-
-                        # Simplified selection logic
                         row = dict(Z=Z, AE_A0=AE, P_over_D=PD, D_m=D, RPM=rpm,
                                    n_rps=n, J=J, KT=KT, KQ=KQ,
-                                   Thrust_N=T, Torque_Nm=Q, Power_W=P,
-                                   Efficiency=eta0)
-
+                                   Thrust_N=T, Torque_Nm=Q, Power_W=P, Efficiency=eta0,
+                                   tip_speed_mps=tip_speed)
                         trade_space.append(row)
-
-                        # Unified selection based on mode
-                        if mode == "min_power":
-                            if P < best_power:
-                                best, best_power = row, P
-                        elif mode == "max_efficiency":
-                            if eta0 > best_metric or (eta0 == best_metric and P < best_power):
-                                best, best_metric, best_power = row, eta0, P
-                        else:  # default to min_power
-                            if P < best_power:
-                                best, best_power = row, P
-
+                        if mode == "min_power_eta":
+                            if eta0 < eta0_min: continue
+                            if P < best_power: best = row; best_power = P
+                        else:  # max_efficiency
+                            if eta0 > best_metric or (abs(eta0 - best_metric) < 1e-4 and P < best_power):
+                                best = row;
+                                best_metric = eta0;
+                                best_power = P
+                                best["n_propellers"] = n_propellers
+                                best["Total_Thrust_N"] = T_total
+                                best["Total_Power_W"] = best["Power_W"] * n_propellers
+                                best["Total_Torque_Nm"] = best["Torque_Nm"] * n_propellers
+                                best["trade_space"] = trade_space
     if not best:
         return {"feasible": False, "message": "No feasible solution found."}
-
-    # Add summary info to best result
-    best.update({
-        "feasible": True,
-        "n_propellers": n_propellers,
-        "Total_Thrust_N": T_total,
-        "Total_Power_W": best["Power_W"] * n_propellers,
-        "Total_Torque_Nm": best["Torque_Nm"] * n_propellers,
-        "trade_space": trade_space,
-        "message": f"Optimized: Z={best['Z']}, AE/A0={best['AE_A0']:.3f}, "
-                   f"P/D={best['P_over_D']:.3f}, D={best['D_m']:.2f}m, "
-                   f"RPM={best['RPM']:.0f}, η0={best['Efficiency']:.3f}, "
-                   f"Power={best['Power_W'] / 1000:.1f}kW"
-    })
-
+    best["feasible"] = True
+    best["message"] = (
+        f"Grid optimisation: "
+        f"{n_propellers} × propellers: "
+        f"Z={best['Z']}, AE/A0={best['AE_A0']}, P/D={best['P_over_D']}, "
+        f"D={best['D_m']:.2f} m, RPM={best['RPM']:.0f}, "
+        f"η0={best['Efficiency']:.3f}, "
+        f"Per-prop Power={best['Power_W'] / 1000:.1f} kW, "
+        f"Total Power={best['Total_Power_W'] / 1000:.1f} kW"
+    )
+    progress_bar.empty()  # clear when finished
     return fmt_dict(best, 5)
 
 
@@ -418,13 +406,13 @@ def continuous_optimize(resistance_kN: float,
     eta0 = (J * KT) / (2 * math.pi * KQ)
 
     msg = (f"Continuous opt: "
-           f"{n_propellers} × propellers: "
-           f"Z={Z}, AE/A0={AE:.3f}, P/D={P_D:.3f}, "
-           f"D={D:.2f} m, RPM={rpm:.0f}, "
-           f"η0={eta0:.3f}, "
-           f"Per-prop Power={P / 1000:.1f} kW, "
-           f"Total Power={(P * n_propellers) / 1000:.1f} kW"
-           )
+        f"{n_propellers} × propellers: "
+        f"Z={Z}, AE/A0={AE:.3f}, P/D={P_D:.3f}, "
+        f"D={D:.2f} m, RPM={rpm:.0f}, "
+        f"η0={eta0:.3f}, "
+        f"Per-prop Power={P / 1000:.1f} kW, "
+        f"Total Power={(P * n_propellers) / 1000:.1f} kW"
+    )
 
     if not result.success:
         msg = f"⚠️ Continuous optimisation warning: {result.message}"
@@ -491,6 +479,8 @@ def plot_selected_prop(best: dict, Re: float = 2e6):
     return fig
 
 
+
+
 def plot_efficiency_map(trade_space, color_by="P_over_D", filters=None,
                         best_grid=None, best_cont=None):
     df = pd.DataFrame(trade_space)
@@ -502,18 +492,11 @@ def plot_efficiency_map(trade_space, color_by="P_over_D", filters=None,
                 df = df[df[key].isin(vals)]
 
     fig = px.scatter(
-        #df, x="J", y="Efficiency",
-        df, x="J", y="Power_W",
+        df, x="J", y="Efficiency",
         color=color_by,
         hover_data=["Z", "AE_A0", "P_over_D", "D_m", "RPM", "Power_W", "Thrust_N"],
         color_continuous_scale="Viridis",
-        #title=f"Efficiency map colored by {color_by}",
-        title="Power map (absorbed power vs J)"
-    )
-    fig.update_layout(
-        yaxis_title="Absorbed Power (W)",
-        xaxis_title="Advance Coefficient J"
-    )
+        title=f"Efficiency map colored by {color_by}",
     )
 
     if best_grid:
